@@ -1,0 +1,160 @@
+# gesture_robot_falling_obstacle.py
+# Gesture Robot Mini-Game: Falling Obstacles
+# Run: python gesture_robot_falling_obstacle.py
+
+import cv2
+import mediapipe as mp
+import pygame
+import numpy as np
+from collections import deque
+import random
+
+# ====== Mediapipe setup ======
+mp_hands = mp.solutions.hands
+mp_draw = mp.solutions.drawing_utils
+hands = mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.7)
+cap = cv2.VideoCapture(0)
+
+landmarks_history = deque(maxlen=6)
+gesture_history = deque(maxlen=5)
+
+# ====== Pygame setup ======
+pygame.init()
+WIDTH, HEIGHT = 600, 400
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("AI Gesture Robot Mini-Game")
+clock = pygame.time.Clock()
+robot = pygame.Rect(280, 350, 40, 40)  # start near bottom
+
+# ====== Game variables ======
+stable_gesture = ""  # was "DOWN"
+score = 0
+missiles = []  # list of Rect
+OBSTACLE_SPEED = 3
+MISSILE_SPEED = 10
+
+# Create initial obstacles
+obstacles = [pygame.Rect(random.randint(50,550), random.randint(-300,0), 30,30) for _ in range(5)]
+
+# ====== Gesture Detection ======
+def get_gesture(avg_landmarks, hand_label):
+    xs = avg_landmarks[:,0]
+    ys = avg_landmarks[:,1]
+    hand_width = xs.max() - xs.min() if xs.max()-xs.min() > 1e-6 else 0.05
+    hand_height = ys.max() - ys.min() if ys.max()-ys.min() > 1e-6 else 0.05
+    horiz_thresh = hand_width * 0.16
+    vert_thresh = hand_height * 0.18
+
+    fingers = []
+
+    # Thumb
+    if hand_label=="Right":
+        fingers.append(1 if avg_landmarks[4,0] > avg_landmarks[3,0]+horiz_thresh*0.1 else 0)
+    else:
+        fingers.append(1 if avg_landmarks[4,0] < avg_landmarks[3,0]-horiz_thresh*0.1 else 0)
+
+    # Index → Pinky
+    for tip_idx in [8,12,16,20]:
+        fingers.append(1 if avg_landmarks[tip_idx,1] < avg_landmarks[tip_idx-2,1]-vert_thresh*0.05 else 0)
+
+    wrist_x = avg_landmarks[0,0]
+    index_x = avg_landmarks[8,0]
+
+    # Detect pinch (thumb+index close)
+    pinch_dist = np.linalg.norm(avg_landmarks[4]-avg_landmarks[8])
+    pinch = pinch_dist < 0.05  # ปรับ threshold ตามความเหมาะสม
+
+    if pinch:
+        return "SHOOT"
+
+    # Only return LEFT or RIGHT for lateral movement; otherwise return None (ignored)
+    if index_x < wrist_x - horiz_thresh:
+        return "LEFT"
+    elif index_x > wrist_x + horiz_thresh:
+        return "RIGHT"
+    else:
+        return None
+
+# ====== Main Loop ======
+running = True
+while running:
+    success, img = cap.read()
+    if not success: break
+    img = cv2.flip(img,1)
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    results = hands.process(img_rgb)
+
+    # ----- Gesture Detection -----
+    if results.multi_hand_landmarks:
+        for handLms, handedness in zip(results.multi_hand_landmarks, results.multi_handedness):
+            pts = np.array([[p.x,p.y] for p in handLms.landmark], dtype=np.float32)
+            landmarks_history.append(pts)
+            avg = np.mean(np.array(landmarks_history), axis=0)
+            hand_label = handedness.classification[0].label
+            g = get_gesture(avg, hand_label)
+            # Only record the three allowed gestures
+            if g in ("LEFT", "RIGHT", "SHOOT"):
+                gesture_history.append(g)
+                vals, counts = np.unique(np.array(gesture_history), return_counts=True)
+                stable_gesture = vals[counts.argmax()]
+            mp_draw.draw_landmarks(img, handLms, mp_hands.HAND_CONNECTIONS)
+
+    # ----- Update Robot -----
+    # only horizontal movement now
+    if stable_gesture=="LEFT":
+        robot.x -= 5
+    elif stable_gesture=="RIGHT":
+        robot.x += 5
+    robot.x = max(0,min(robot.x,WIDTH-robot.width))
+    robot.y = max(0,min(robot.y,HEIGHT-robot.height))
+
+    # ----- Shoot Missile -----
+    if stable_gesture=="SHOOT":
+        missiles.append(pygame.Rect(robot.centerx-5, robot.top-10, 10,20))
+
+    # Update missile position
+    for m in missiles[:]:
+        m.y -= MISSILE_SPEED
+        # Check collision with obstacles
+        for o in obstacles[:]:
+            if m.colliderect(o):
+                obstacles.remove(o)
+                missiles.remove(m)
+                score += 1
+                break
+        if m.y < -20:
+            missiles.remove(m)
+
+    # ----- Update Obstacles (falling) -----
+    for o in obstacles:
+        o.y += OBSTACLE_SPEED
+        if o.y > HEIGHT:  # respawn at top
+            o.x = random.randint(50,550)
+            o.y = random.randint(-100,0)
+
+    # ----- Draw everything -----
+    screen.fill((30,30,30))
+    pygame.draw.rect(screen,(0,200,255),robot)
+    for m in missiles:
+        pygame.draw.rect(screen,(255,255,0),m)
+    for o in obstacles:
+        pygame.draw.rect(screen,(255,0,0),o)
+    font = pygame.font.SysFont(None,30)
+    screen.blit(font.render(f"Score: {score}", True,(255,255,255)), (10,10))
+    pygame.display.flip()
+    clock.tick(30)
+
+    # ----- Show webcam -----
+    cv2.putText(img, f"Gesture: {stable_gesture}", (10,30),
+                cv2.FONT_HERSHEY_SIMPLEX, 1, (255,0,0), 2)
+    cv2.imshow("Fingershoot", img)
+
+    key = cv2.waitKey(1) & 0xFF
+    if key==27: running=False
+    if key==ord('r'):
+        landmarks_history.clear()
+        gesture_history.clear()
+
+cap.release()
+cv2.destroyAllWindows()
+pygame.quit()
